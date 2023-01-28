@@ -1,29 +1,78 @@
 const socket = io();
+
 const myFace = document.getElementById("myFace");
 const muteBtn = document.getElementById("mute");
 const cameraBtn = document.getElementById("camera");
+const camerasSelect = document.getElementById("cameras");
+const call = document.getElementById("call");
+const micsSelect = document.getElementById("mics");
 
+call.hidden = true;
 
 let myStream;
 let muted = false;
 let cameraOff = false;
+let roomName;
+let myPeerConnection;
 
-async function getMedia() {
+async function getCameras() {
   try {
-    myStream = await navigator.mediaDevices.getUserMedia(
-      {
-        audio: true,
-        video: true,
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const cameras = devices.filter((device) => device.kind === "videoinput");
+    const currentCamera = myStream.getVideoTracks()[0];
+    cameras.forEach((camera) => {
+      const option = document.createElement("option");
+      option.value = camera.deviceId;
+      option.innerText = camera.label;
+      if (currentCamera.label == camera.label) {
+        option.selected = true;
       }
-    );
-    console.log(myStream);
-    myFace.srcObject = myStream;
+      camerasSelect.appendChild(option);
+    });
   } catch (e) {
     console.log(e);
   }
 }
 
-getMedia();
+async function getMics() {
+  try {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const mics = devices.filter((device) => device.kind === "audioinput");
+    mics.forEach((mic) => {
+      const option = document.createElement("option");
+      option.value = mic.deviceId;
+      option.innerText = mic.label;
+      micsSelect.appendChild(option);
+    });
+  } catch (e) {
+    console.log(e);
+  }
+}
+
+async function getMedia(deviceId) {
+  const initialConstraints = {
+    audio: true,
+    video: true,
+  };
+
+  const cameraConstraints = {
+    audio: true,
+    video: { deviceId: { exact: deviceId, } },
+  };
+  try {
+    myStream = await navigator.mediaDevices.getUserMedia(
+      deviceId ? cameraConstraints : initialConstraints
+    );
+    myFace.srcObject = myStream;
+
+    if (!deviceId) {
+      await getCameras();
+      await getMics();
+    }
+  } catch (e) {
+    console.log(e);
+  }
+}
 
 function handleMuteClick() {
   // console.log(myStream.getAudioTracks());
@@ -38,6 +87,7 @@ function handleMuteClick() {
     muted = false;
   }
 }
+
 function handleCameraClick() {
   // console.log(myStream.getVideoTracks());
   myStream
@@ -52,17 +102,125 @@ function handleCameraClick() {
   }
 }
 
+async function handleCameraChange() {
+  await getMedia(camerasSelect.value);
+  if (myPeerConnection) {
+    const videoTrack = myStream.getVideoTracks()[0];
+    const videoSender = myPeerConnection
+      .getSenders()
+      .find(sender => sender.track.kind === "video");
+    videoSender.replaceTrack(videoTrack);
+  }
+}
+
+function handleMicChange() {
+  console.log(micsSelect.value);
+}
 
 muteBtn.addEventListener("click", handleMuteClick);
 cameraBtn.addEventListener("click", handleCameraClick);
+camerasSelect.addEventListener("input", handleCameraChange);
+micsSelect.addEventListener("input", handleMicChange);
 
 
+// Welcome Form (join a room)
+const welcome = document.getElementById("welcome");
+const welcomeForm = welcome.querySelector("form");
 
+async function initCall() {
+  welcome.hidden = true;
+  call.hidden = false;
+  console.log("entered the room");
+  await getMedia();
+  console.log("got the media");
+  makeConnection();
+  console.log("made the RTC Peer connection");
+  console.log("------------------------------");
+}
 
+async function handleWelcomeSubmit(event) {
+  event.preventDefault();
+  const input = welcomeForm.querySelector("input");
+  await initCall();
+  socket.emit("join_room", input.value);
+  roomName = input.value;
+  input.value = "";
+}
 
+welcomeForm.addEventListener("submit", handleWelcomeSubmit);
 
+socket.on("welcome", async () => {
+  console.log(">>>>>>> Someone joined the room!!");
+  const offer = await myPeerConnection.createOffer();
+  console.log("So I created the offer");
+  myPeerConnection.setLocalDescription(offer);
+  console.log("and set the local description");
+  socket.emit("offer", offer, roomName);
+  console.log("and then sent the offer!!");
+  console.log("------------------------------");
+});
 
+socket.on("offer", async offer => {
+  console.log("I recieved the offer");
+  myPeerConnection.setRemoteDescription(offer);
+  console.log("so I set the remote description");
+  const answer = await myPeerConnection.createAnswer();
+  console.log("and created the answer");
+  myPeerConnection.setLocalDescription(answer);
+  console.log("and set the local description");
+  socket.emit("answer", answer, roomName);
+  console.log("and then sent the answer!!");
+  console.log("------------------------------");
+});
 
+socket.on("answer", answer => {
+  console.log("recieved the answer");
+  myPeerConnection.setRemoteDescription(answer);
+  console.log("set the remote description");
+
+});
+
+socket.on("ice", ice => {
+  console.log("recieved candidate");
+  myPeerConnection.addIceCandidate(ice);
+  // console.log("added ICE Candidate");
+});
+
+function makeConnection() {
+  // WebRTC P2P Connection
+  myPeerConnection = new RTCPeerConnection({
+    iceServers: [ // STUN Servers
+      {
+        urls: [
+          "stun:stun.l.google.com:19302",
+          "stun:stun1.l.google.com:19302",
+          "stun:stun2.l.google.com:19302",
+          "stun:stun3.l.google.com:19302",
+          "stun:stun4.l.google.com:19302",
+        ],
+      },
+    ],
+  });
+  myPeerConnection.addEventListener("icecandidate", handleIce);
+  myPeerConnection.addEventListener("addstream", handleAddStream);
+  myStream
+    .getTracks()
+    .forEach((track) => myPeerConnection.addTrack(track, myStream));
+}
+
+function handleIce(data) {
+  socket.emit("ice", data.candidate, roomName);
+  console.log("sent candidate");
+}
+
+function handleAddStream(data) {
+  // const peersStream = document.getElementById("peersStream");
+  const peerFace = document.getElementById("peerFace");
+  peerFace.srcObject = data.stream;
+  console.log(">>>>>>> got an event from my peer!!");
+  console.log("Peer's Stream", data.stream);
+  console.log("My Stream", myStream);
+}
 
 
 
